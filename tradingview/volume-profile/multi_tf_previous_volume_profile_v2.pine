@@ -1,0 +1,540 @@
+//@version=6
+// =============================================================================
+// MULTI-TF PREVIOUS VOLUME PROFILE — v2
+// =============================================================================
+// Displays previous (completed) volume profiles for up to 3 timeframes
+// simultaneously, on any chart TF lower than each profile TF.
+//
+// v2 changes vs v1:
+//   - BUG FIX: works on any chart TF (including 5m, 1m) via
+//              ignore_invalid_timeframe=true on intrabar fetches
+//   - PRECISION: per-TF volume distribution mode:
+//                Proportional (overlap-weighted, ~TV behavior, default)
+//                HLC3 concentration (sharper, single-point)
+//                Uniform-N (legacy v1 behavior)
+//   - PRECISION: per-TF row layout: Number of rows OR Ticks per row
+//   - PRECISION: cleaner POC/VAH/VAL expansion algorithm
+//   - LAYOUT: per-TF histogram anchor (Left default, or Right)
+// =============================================================================
+
+indicator("Multi-TF Previous Volume Profile v2", "MTF Prev VP v2",
+     overlay              = true,
+     max_boxes_count      = 500,
+     max_lines_count      = 500,
+     max_labels_count     = 100,
+     max_bars_back        = 1000)
+
+// =============================================================================
+// USER-DEFINED TYPES
+// =============================================================================
+
+type TFConfig
+    bool   enabled
+    string tfPeriod
+    string intrabarTF
+    string distMode      // "Proportional" | "HLC3 concentration" | "Uniform-N"
+    string rowMode       // "Number of rows" | "Ticks per row"
+    int    rowsCount     // used when rowMode = "Number of rows"
+    int    ticksPerRow   // used when rowMode = "Ticks per row"
+    int    histLookback
+    int    levelLookback
+    bool   showHist
+    bool   showLevels
+    bool   extendLevels
+    bool   anchorLeft    // true = histogram anchored to period start (extends right)
+    color  bullCol
+    color  bearCol
+    color  pocCol
+    color  vahCol
+    color  valCol
+
+type HistPeriod
+    array<box> bullBoxes
+    array<box> bearBoxes
+    int        endBar
+
+type LevelPeriod
+    line  pocLn
+    line  vahLn
+    line  valLn
+    float pocPrice
+    float vahPrice
+    float valPrice
+    int   startBar
+    int   endBar
+    bool  pocBroken
+    bool  vahBroken
+    bool  valBroken
+    int   pocInitSide
+    int   vahInitSide
+    int   valInitSide
+
+type TFState
+    array<float>         accH
+    array<float>         accL
+    array<float>         accO
+    array<float>         accC
+    array<float>         accV
+    int                  periodStartBar
+    bool                 firstPeriodSeen
+    array<HistPeriod>    hists
+    array<LevelPeriod>   levels
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+// ---------- Global ----------
+gG = "═══ Global ═══"
+valueAreaPct = input.float(70.0, "Value Area %", minval=10, maxval=99, step=1, group=gG)
+histWidthPct = input.float(35.0, "Histogram width (% of period width)", minval=5, maxval=90, step=5, group=gG)
+extPad       = input.int(0, "Extension padding bars", minval=0, maxval=100, group=gG)
+maxRowsCap   = input.int(200, "Max rows per profile (safety cap for Ticks-per-row mode)", minval=20, maxval=500, group=gG,
+     tooltip="Hard cap on bin count to prevent runaway profiles on low-tick-size instruments.")
+
+DIST_PROP    = "Proportional (overlap-weighted)"
+DIST_HLC3    = "HLC3 concentration (single point)"
+DIST_UNIF    = "Uniform-N (v1 legacy)"
+
+ROW_COUNT    = "Number of rows"
+ROW_TICKS    = "Ticks per row"
+
+// ---------- Slot 1 (default: Daily) ----------
+g1 = "═══ Slot 1 (Daily defaults) ═══"
+tf1_en   = input.bool(true,  "Enable Slot 1",                 group=g1)
+tf1_tf   = input.timeframe("D", "Profile timeframe",          group=g1)
+tf1_itf  = input.timeframe("5", "Intrabar timeframe",         group=g1,
+     tooltip="Lower TF used to build profiles. Auto-falls back to chart bars if chart TF is already finer or intrabar TF is invalid.")
+tf1_dist = input.string(DIST_PROP, "Volume distribution", options=[DIST_PROP, DIST_HLC3, DIST_UNIF], group=g1)
+tf1_rmod = input.string(ROW_COUNT, "Row layout",        options=[ROW_COUNT, ROW_TICKS], group=g1)
+tf1_rows = input.int(25, "Number of rows",   minval=5, maxval=200, group=g1)
+tf1_tpr  = input.int(5,  "Ticks per row",    minval=1, maxval=1000, group=g1,
+     tooltip="Only used when Row layout = Ticks per row. Bin width = ticks × instrument min-tick.")
+tf1_hl   = input.int(5,  "Histogram lookback (periods)", minval=0, maxval=50,  group=g1)
+tf1_ll   = input.int(50, "Levels lookback (periods)",    minval=0, maxval=300, group=g1)
+tf1_sh   = input.bool(true, "Show histogram",  group=g1, inline="s1")
+tf1_sl   = input.bool(true, "Show levels",     group=g1, inline="s1")
+tf1_ext  = input.bool(false,"Extend levels until broken (else contained in period)", group=g1)
+tf1_anch = input.bool(true, "Histogram anchored LEFT (else right)", group=g1)
+tf1_bull = input.color(color.new(#26a69a, 30), "Bull", group=g1, inline="c1a")
+tf1_bear = input.color(color.new(#ef5350, 30), "Bear", group=g1, inline="c1a")
+tf1_poc  = input.color(color.new(color.yellow, 0),  "POC", group=g1, inline="c1b")
+tf1_vah  = input.color(color.new(color.blue,  30),  "VAH", group=g1, inline="c1b")
+tf1_val  = input.color(color.new(color.blue,  30),  "VAL", group=g1, inline="c1b")
+
+// ---------- Slot 2 (default: Weekly) ----------
+g2 = "═══ Slot 2 (Weekly defaults) ═══"
+tf2_en   = input.bool(true,  "Enable Slot 2",                 group=g2)
+tf2_tf   = input.timeframe("W", "Profile timeframe",          group=g2)
+tf2_itf  = input.timeframe("5", "Intrabar timeframe",         group=g2)
+tf2_dist = input.string(DIST_PROP, "Volume distribution", options=[DIST_PROP, DIST_HLC3, DIST_UNIF], group=g2)
+tf2_rmod = input.string(ROW_COUNT, "Row layout",        options=[ROW_COUNT, ROW_TICKS], group=g2)
+tf2_rows = input.int(30, "Number of rows",   minval=5, maxval=200, group=g2)
+tf2_tpr  = input.int(10, "Ticks per row",    minval=1, maxval=1000, group=g2)
+tf2_hl   = input.int(2,  "Histogram lookback (periods)", minval=0, maxval=50,  group=g2)
+tf2_ll   = input.int(25, "Levels lookback (periods)",    minval=0, maxval=300, group=g2)
+tf2_sh   = input.bool(true, "Show histogram",  group=g2, inline="s2")
+tf2_sl   = input.bool(true, "Show levels",     group=g2, inline="s2")
+tf2_ext  = input.bool(false,"Extend levels until broken (else contained in period)", group=g2)
+tf2_anch = input.bool(true, "Histogram anchored LEFT (else right)", group=g2)
+tf2_bull = input.color(color.new(#42a5f5, 30), "Bull", group=g2, inline="c2a")
+tf2_bear = input.color(color.new(#ab47bc, 30), "Bear", group=g2, inline="c2a")
+tf2_poc  = input.color(color.new(color.orange, 0),  "POC", group=g2, inline="c2b")
+tf2_vah  = input.color(color.new(color.aqua,   30), "VAH", group=g2, inline="c2b")
+tf2_val  = input.color(color.new(color.aqua,   30), "VAL", group=g2, inline="c2b")
+
+// ---------- Slot 3 (default: Monthly) ----------
+g3 = "═══ Slot 3 (Monthly defaults) ═══"
+tf3_en   = input.bool(true,  "Enable Slot 3",                 group=g3)
+tf3_tf   = input.timeframe("M", "Profile timeframe",          group=g3)
+tf3_itf  = input.timeframe("15","Intrabar timeframe",         group=g3)
+tf3_dist = input.string(DIST_PROP, "Volume distribution", options=[DIST_PROP, DIST_HLC3, DIST_UNIF], group=g3)
+tf3_rmod = input.string(ROW_COUNT, "Row layout",        options=[ROW_COUNT, ROW_TICKS], group=g3)
+tf3_rows = input.int(40, "Number of rows",   minval=5, maxval=200, group=g3)
+tf3_tpr  = input.int(20, "Ticks per row",    minval=1, maxval=1000, group=g3)
+tf3_hl   = input.int(1,  "Histogram lookback (periods)", minval=0, maxval=50,  group=g3)
+tf3_ll   = input.int(12, "Levels lookback (periods)",    minval=0, maxval=300, group=g3)
+tf3_sh   = input.bool(true, "Show histogram",  group=g3, inline="s3")
+tf3_sl   = input.bool(true, "Show levels",     group=g3, inline="s3")
+tf3_ext  = input.bool(false,"Extend levels until broken (else contained in period)", group=g3)
+tf3_anch = input.bool(true, "Histogram anchored LEFT (else right)", group=g3)
+tf3_bull = input.color(color.new(#ffca28, 30), "Bull", group=g3, inline="c3a")
+tf3_bear = input.color(color.new(#7e57c2, 30), "Bear", group=g3, inline="c3a")
+tf3_poc  = input.color(color.new(color.red,   0), "POC", group=g3, inline="c3b")
+tf3_vah  = input.color(color.new(color.lime, 30), "VAH", group=g3, inline="c3b")
+tf3_val  = input.color(color.new(color.lime, 30), "VAL", group=g3, inline="c3b")
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+// Resolve effective rows and binSize for a period given config + period range.
+resolveBinning(TFConfig cfg, float pHigh, float pLow, int maxCap) =>
+    float rng = pHigh - pLow
+    int   rows = 0
+    float binSize = 0.0
+    if rng > 0
+        if cfg.rowMode == ROW_TICKS
+            float tickSize = math.max(syminfo.mintick, syminfo.mintick)  // safe-guard
+            binSize := cfg.ticksPerRow * syminfo.mintick
+            if binSize > 0
+                rows := int(math.ceil(rng / binSize))
+                rows := math.max(5, math.min(rows, maxCap))
+                binSize := rng / rows  // re-fit so range exactly covers integer rows
+        else
+            rows := cfg.rowsCount
+            binSize := rng / rows
+    [rows, binSize]
+
+
+// Build histogram bins, POC, VAH, VAL from accumulated OHLCV arrays.
+buildProfile(TFConfig cfg, array<float> accH, array<float> accL,
+             array<float> accO, array<float> accC, array<float> accV,
+             float vaPct, int maxRowsCap) =>
+    int n = array.size(accH)
+    float pHigh = n > 0 ? array.max(accH) : 0.0
+    float pLow  = n > 0 ? array.min(accL) : 0.0
+    [rows, binSize] = resolveBinning(cfg, pHigh, pLow, maxRowsCap)
+
+    array<float> bullBins = array.new<float>(math.max(1, rows), 0.0)
+    array<float> bearBins = array.new<float>(math.max(1, rows), 0.0)
+    int   pocIdx   = -1
+    float pocPrice = 0.0
+    float vahPrice = 0.0
+    float valPrice = 0.0
+
+    if rows > 0 and binSize > 0 and n > 0
+        for i = 0 to n - 1
+            float h = array.get(accH, i)
+            float l = array.get(accL, i)
+            float v = array.get(accV, i)
+            float o = array.get(accO, i)
+            float c = array.get(accC, i)
+            bool  isBull = c >= o
+
+            if v > 0 and h >= l
+                if cfg.distMode == DIST_HLC3 or h == l
+                    // Concentrate all volume at HLC3 (or close if h==l fallback)
+                    float pt = h == l ? c : (h + l + c) / 3.0
+                    int bi = math.max(0, math.min(rows - 1, int(math.floor((pt - pLow) / binSize))))
+                    if isBull
+                        array.set(bullBins, bi, array.get(bullBins, bi) + v)
+                    else
+                        array.set(bearBins, bi, array.get(bearBins, bi) + v)
+                else
+                    int firstBin = math.max(0,        int(math.floor((l - pLow) / binSize)))
+                    int lastBin  = math.min(rows - 1, int(math.floor((h - pLow) / binSize)))
+                    if lastBin < firstBin
+                        lastBin := firstBin
+
+                    if cfg.distMode == DIST_PROP
+                        // Proportional: weight by overlap fraction with each bin
+                        float barRange = h - l
+                        for b = firstBin to lastBin
+                            float binLo = pLow + b * binSize
+                            float binHi = pLow + (b + 1) * binSize
+                            float oLo = math.max(l, binLo)
+                            float oHi = math.min(h, binHi)
+                            float oLen = math.max(0.0, oHi - oLo)
+                            float frac = oLen / barRange
+                            float vBin = v * frac
+                            if isBull
+                                array.set(bullBins, b, array.get(bullBins, b) + vBin)
+                            else
+                                array.set(bearBins, b, array.get(bearBins, b) + vBin)
+                    else
+                        // Uniform-N (legacy v1)
+                        int nb = lastBin - firstBin + 1
+                        float vpb = v / nb
+                        for b = firstBin to lastBin
+                            if isBull
+                                array.set(bullBins, b, array.get(bullBins, b) + vpb)
+                            else
+                                array.set(bearBins, b, array.get(bearBins, b) + vpb)
+
+        // POC
+        array<float> totalBins = array.new<float>(rows, 0.0)
+        float maxVol = 0.0
+        for b = 0 to rows - 1
+            float t = array.get(bullBins, b) + array.get(bearBins, b)
+            array.set(totalBins, b, t)
+            if t > maxVol
+                maxVol := t
+                pocIdx := b
+
+        // Value area expansion (single-bin step, standard volume profile)
+        if pocIdx >= 0
+            float totalVol = array.sum(totalBins)
+            float target   = totalVol * vaPct / 100.0
+            float cumVol   = array.get(totalBins, pocIdx)
+            int   vahIdx   = pocIdx
+            int   valIdx   = pocIdx
+            while cumVol < target
+                bool canUp   = vahIdx < rows - 1
+                bool canDown = valIdx > 0
+                if not canUp and not canDown
+                    break
+                float up   = canUp   ? array.get(totalBins, vahIdx + 1) : -1.0
+                float down = canDown ? array.get(totalBins, valIdx - 1) : -1.0
+                bool goUp = canUp and (not canDown or up >= down)
+                if goUp
+                    vahIdx += 1
+                    cumVol += array.get(totalBins, vahIdx)
+                else
+                    valIdx -= 1
+                    cumVol += array.get(totalBins, valIdx)
+            pocPrice := pLow + (pocIdx + 0.5) * binSize
+            vahPrice := pLow + (vahIdx + 1)   * binSize
+            valPrice := pLow +  valIdx        * binSize
+
+    [bullBins, bearBins, pocIdx, rows, pLow, binSize, pocPrice, vahPrice, valPrice]
+
+
+// Should we use intrabar arrays, or fall back to chart bars?
+useIntrabarFor(string intrabarTF, array<float> ibH) =>
+    int itbSec   = timeframe.in_seconds(intrabarTF)
+    int chartSec = timeframe.in_seconds(timeframe.period)
+    itbSec < chartSec and array.size(ibH) > 0
+
+
+// Accumulate one chart bar's data into a TF's accumulation arrays.
+accumulateBar(TFState s, bool useITB,
+              array<float> ibH, array<float> ibL, array<float> ibO,
+              array<float> ibC, array<float> ibV) =>
+    if useITB
+        int n = array.size(ibH)
+        for i = 0 to n - 1
+            array.push(s.accH, array.get(ibH, i))
+            array.push(s.accL, array.get(ibL, i))
+            array.push(s.accO, array.get(ibO, i))
+            array.push(s.accC, array.get(ibC, i))
+            array.push(s.accV, array.get(ibV, i))
+    else
+        array.push(s.accH, high)
+        array.push(s.accL, low)
+        array.push(s.accO, open)
+        array.push(s.accC, close)
+        array.push(s.accV, volume)
+
+
+// Draw histogram for a just-closed period (supports left or right anchor).
+drawHistogram(TFConfig cfg, TFState s,
+              array<float> bullBins, array<float> bearBins, int rows,
+              float pLow, float binSize, int periodStartBar, int periodEndBar,
+              float histWidthPct) =>
+    if cfg.showHist and cfg.histLookback > 0 and binSize > 0 and rows > 0
+        float maxBinTotal = 0.0
+        for b = 0 to rows - 1
+            float t = array.get(bullBins, b) + array.get(bearBins, b)
+            if t > maxBinTotal
+                maxBinTotal := t
+
+        int periodLen = math.max(1, periodEndBar - periodStartBar)
+        int maxWidth  = math.max(1, int(math.floor(periodLen * histWidthPct / 100.0)))
+        float scale   = maxBinTotal > 0 ? maxWidth / maxBinTotal : 0.0
+
+        HistPeriod hp = HistPeriod.new(array.new<box>(0), array.new<box>(0), periodEndBar)
+
+        int anchor = cfg.anchorLeft ? periodStartBar : periodEndBar
+
+        for b = 0 to rows - 1
+            float bv = array.get(bullBins, b)
+            float sv = array.get(bearBins, b)
+            if bv + sv > 0
+                float yBot = pLow + b * binSize
+                float yTop = pLow + (b + 1) * binSize
+                int   bullW = int(math.floor(bv * scale))
+                int   bearW = int(math.floor(sv * scale))
+                int bullLeft = 0
+                int bullRight = 0
+                int bearLeft = 0
+                int bearRight = 0
+                if cfg.anchorLeft
+                    bullLeft  := anchor
+                    bullRight := anchor + bullW
+                    bearLeft  := bullRight
+                    bearRight := bearLeft + bearW
+                else
+                    bullRight := anchor
+                    bullLeft  := anchor - bullW
+                    bearRight := bullLeft
+                    bearLeft  := bearRight - bearW
+
+                if bullW > 0
+                    box bx = box.new(bullLeft, yTop, bullRight, yBot,
+                         border_color = cfg.bullCol, bgcolor = cfg.bullCol,
+                         border_width = 1, xloc = xloc.bar_index)
+                    array.push(hp.bullBoxes, bx)
+                if bearW > 0
+                    box bx = box.new(bearLeft, yTop, bearRight, yBot,
+                         border_color = cfg.bearCol, bgcolor = cfg.bearCol,
+                         border_width = 1, xloc = xloc.bar_index)
+                    array.push(hp.bearBoxes, bx)
+
+        array.push(s.hists, hp)
+
+        // Prune oldest histograms past the lookback budget
+        while array.size(s.hists) > cfg.histLookback
+            HistPeriod old = array.shift(s.hists)
+            int nB = array.size(old.bullBoxes)
+            if nB > 0
+                for i = 0 to nB - 1
+                    box.delete(array.get(old.bullBoxes, i))
+            int nS = array.size(old.bearBoxes)
+            if nS > 0
+                for i = 0 to nS - 1
+                    box.delete(array.get(old.bearBoxes, i))
+
+
+// Draw POC / VAH / VAL lines for a just-closed period.
+drawLevels(TFConfig cfg, TFState s, float pocPrice, float vahPrice, float valPrice,
+           int periodStartBar, int periodEndBar, float closeAtEnd, int extPad) =>
+    if cfg.showLevels and cfg.levelLookback > 0
+        int rightEnd = cfg.extendLevels ? bar_index + extPad : periodEndBar
+        line pocLn = line.new(periodStartBar, pocPrice, rightEnd, pocPrice,
+             color = cfg.pocCol, width = 2, xloc = xloc.bar_index)
+        line vahLn = line.new(periodStartBar, vahPrice, rightEnd, vahPrice,
+             color = cfg.vahCol, width = 1, style = line.style_dashed, xloc = xloc.bar_index)
+        line valLn = line.new(periodStartBar, valPrice, rightEnd, valPrice,
+             color = cfg.valCol, width = 1, style = line.style_dashed, xloc = xloc.bar_index)
+
+        int pocSide = closeAtEnd >= pocPrice ?  1 : -1
+        int vahSide = closeAtEnd >= vahPrice ?  1 : -1
+        int valSide = closeAtEnd >= valPrice ?  1 : -1
+
+        LevelPeriod lp = LevelPeriod.new(pocLn, vahLn, valLn,
+             pocPrice, vahPrice, valPrice,
+             periodStartBar, periodEndBar,
+             false, false, false,
+             pocSide, vahSide, valSide)
+
+        array.push(s.levels, lp)
+
+        while array.size(s.levels) > cfg.levelLookback
+            LevelPeriod old = array.shift(s.levels)
+            line.delete(old.pocLn)
+            line.delete(old.vahLn)
+            line.delete(old.valLn)
+
+
+// Per-bar update of extended-until-broken levels.
+updateExtendedLevels(TFConfig cfg, TFState s, int extPad) =>
+    if cfg.extendLevels and cfg.showLevels
+        int n = array.size(s.levels)
+        if n > 0
+            for i = 0 to n - 1
+                LevelPeriod lp = array.get(s.levels, i)
+                if not lp.pocBroken
+                    int curSide = close >= lp.pocPrice ? 1 : -1
+                    if curSide != lp.pocInitSide
+                        lp.pocBroken := true
+                        line.set_x2(lp.pocLn, bar_index)
+                    else
+                        line.set_x2(lp.pocLn, bar_index + extPad)
+                if not lp.vahBroken
+                    int curSide = close >= lp.vahPrice ? 1 : -1
+                    if curSide != lp.vahInitSide
+                        lp.vahBroken := true
+                        line.set_x2(lp.vahLn, bar_index)
+                    else
+                        line.set_x2(lp.vahLn, bar_index + extPad)
+                if not lp.valBroken
+                    int curSide = close >= lp.valPrice ? 1 : -1
+                    if curSide != lp.valInitSide
+                        lp.valBroken := true
+                        line.set_x2(lp.valLn, bar_index)
+                    else
+                        line.set_x2(lp.valLn, bar_index + extPad)
+
+
+// Main per-TF processing on a chart bar.
+processTF(TFConfig cfg, TFState s,
+          array<float> ibH, array<float> ibL, array<float> ibO,
+          array<float> ibC, array<float> ibV,
+          float vaPct, float histWidthPct, int extPad, int maxRowsCap) =>
+    if cfg.enabled
+        bool periodChanged = ta.change(time(cfg.tfPeriod)) != 0
+
+        if periodChanged and barstate.isconfirmed
+            if s.firstPeriodSeen and array.size(s.accH) > 0
+                int periodEndBar   = bar_index - 1
+                int periodStartBar = s.periodStartBar
+                float closeAtEnd   = close[1]
+
+                [bullBins, bearBins, pocIdx, rows, pLow, binSize, pocPrice, vahPrice, valPrice] =
+                     buildProfile(cfg, s.accH, s.accL, s.accO, s.accC, s.accV, vaPct, maxRowsCap)
+
+                if pocIdx >= 0
+                    drawHistogram(cfg, s, bullBins, bearBins, rows, pLow, binSize,
+                         periodStartBar, periodEndBar, histWidthPct)
+                    drawLevels(cfg, s, pocPrice, vahPrice, valPrice,
+                         periodStartBar, periodEndBar, closeAtEnd, extPad)
+
+            array.clear(s.accH)
+            array.clear(s.accL)
+            array.clear(s.accO)
+            array.clear(s.accC)
+            array.clear(s.accV)
+            s.periodStartBar := bar_index
+            s.firstPeriodSeen := true
+
+        if barstate.isconfirmed
+            bool useITB = useIntrabarFor(cfg.intrabarTF, ibH)
+            accumulateBar(s, useITB, ibH, ibL, ibO, ibC, ibV)
+
+        updateExtendedLevels(cfg, s, extPad)
+
+
+// =============================================================================
+// STATE & CONFIG INSTANCES
+// =============================================================================
+
+var TFState tf1State = TFState.new(
+     array.new<float>(0), array.new<float>(0), array.new<float>(0),
+     array.new<float>(0), array.new<float>(0),
+     0, false, array.new<HistPeriod>(0), array.new<LevelPeriod>(0))
+
+var TFState tf2State = TFState.new(
+     array.new<float>(0), array.new<float>(0), array.new<float>(0),
+     array.new<float>(0), array.new<float>(0),
+     0, false, array.new<HistPeriod>(0), array.new<LevelPeriod>(0))
+
+var TFState tf3State = TFState.new(
+     array.new<float>(0), array.new<float>(0), array.new<float>(0),
+     array.new<float>(0), array.new<float>(0),
+     0, false, array.new<HistPeriod>(0), array.new<LevelPeriod>(0))
+
+tf1Cfg = TFConfig.new(tf1_en, tf1_tf, tf1_itf, tf1_dist, tf1_rmod, tf1_rows, tf1_tpr,
+     tf1_hl, tf1_ll, tf1_sh, tf1_sl, tf1_ext, tf1_anch,
+     tf1_bull, tf1_bear, tf1_poc, tf1_vah, tf1_val)
+tf2Cfg = TFConfig.new(tf2_en, tf2_tf, tf2_itf, tf2_dist, tf2_rmod, tf2_rows, tf2_tpr,
+     tf2_hl, tf2_ll, tf2_sh, tf2_sl, tf2_ext, tf2_anch,
+     tf2_bull, tf2_bear, tf2_poc, tf2_vah, tf2_val)
+tf3Cfg = TFConfig.new(tf3_en, tf3_tf, tf3_itf, tf3_dist, tf3_rmod, tf3_rows, tf3_tpr,
+     tf3_hl, tf3_ll, tf3_sh, tf3_sl, tf3_ext, tf3_anch,
+     tf3_bull, tf3_bear, tf3_poc, tf3_vah, tf3_val)
+
+// =============================================================================
+// INTRABAR FETCHES (global scope, with ignore_invalid_timeframe for 5m bug fix)
+// =============================================================================
+
+[tf1_ibH, tf1_ibL, tf1_ibO, tf1_ibC, tf1_ibV] =
+     request.security_lower_tf(syminfo.tickerid, tf1_itf, [high, low, open, close, volume],
+          ignore_invalid_timeframe = true)
+[tf2_ibH, tf2_ibL, tf2_ibO, tf2_ibC, tf2_ibV] =
+     request.security_lower_tf(syminfo.tickerid, tf2_itf, [high, low, open, close, volume],
+          ignore_invalid_timeframe = true)
+[tf3_ibH, tf3_ibL, tf3_ibO, tf3_ibC, tf3_ibV] =
+     request.security_lower_tf(syminfo.tickerid, tf3_itf, [high, low, open, close, volume],
+          ignore_invalid_timeframe = true)
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+processTF(tf1Cfg, tf1State, tf1_ibH, tf1_ibL, tf1_ibO, tf1_ibC, tf1_ibV,
+     valueAreaPct, histWidthPct, extPad, maxRowsCap)
+processTF(tf2Cfg, tf2State, tf2_ibH, tf2_ibL, tf2_ibO, tf2_ibC, tf2_ibV,
+     valueAreaPct, histWidthPct, extPad, maxRowsCap)
+processTF(tf3Cfg, tf3State, tf3_ibH, tf3_ibL, tf3_ibO, tf3_ibC, tf3_ibV,
+     valueAreaPct, histWidthPct, extPad, maxRowsCap)

@@ -1,0 +1,657 @@
+//@version=6
+// =============================================================================
+// MULTI-TIME FRAME PVP - v6
+// =============================================================================
+// Displays completed-period levels/VWAP plus one right-side developing profile.
+//
+// v5 design:
+//   - Historical histograms are removed; only historical POC/VAH/VAL and VWAP remain.
+//   - A single developing histogram is drawn to the right of the latest candle.
+//   - Developing histogram source is selectable: VP1, VP2, or VP3.
+//   - Developing POC/VAH/VAL tags can show VP1, VP2, VP3, or all three.
+// =============================================================================
+
+indicator("Multi-time frame PVP", "Multi-time frame PVP",
+     overlay              = true,
+     max_boxes_count      = 500,
+     max_lines_count      = 500,
+     max_labels_count     = 100,
+     max_bars_back        = 1000,
+     dynamic_requests     = true)
+
+// =============================================================================
+// USER-DEFINED TYPES
+// =============================================================================
+
+type TFConfig
+    bool   enabled
+    string tfPeriod
+    string intrabarTF
+    string rowMode       // "Number of rows" | "Ticks per row"
+    int    precision     // rows count or ticks per row, depending on rowMode
+    bool   showLevels
+    bool   extendLevels
+    color  pocCol
+    color  vahCol
+    color  valCol
+
+type LevelPeriod
+    line  pocLn
+    line  vahLn
+    line  valLn
+    float pocPrice
+    float vahPrice
+    float valPrice
+    int   startBar
+    int   endBar
+    bool  pocBroken
+    bool  vahBroken
+    bool  valBroken
+    int   pocInitSide
+    int   vahInitSide
+    int   valInitSide
+
+type TFState
+    array<float>         accH
+    array<float>         accL
+    array<float>         accO
+    array<float>         accC
+    array<float>         accV
+    int                  periodStartBar
+    bool                 firstPeriodSeen
+    array<LevelPeriod>   levels
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+ROW_COUNT  = "Number of rows"
+ROW_TICKS  = "Ticks per row"
+DEV_VP1    = "VP1"
+DEV_VP2    = "VP2"
+DEV_VP3    = "VP3"
+DEV_ALL    = "All"
+
+MAX_ROWS_PER_PROFILE = 200
+MAX_BOX_BUDGET       = 480
+MAX_LINE_BUDGET      = 480
+EXT_PAD              = 0
+
+// ---------- Global ----------
+gG = "=== Global ==="
+valueAreaPct = input.float(70.0, "Value Area %", minval=10, maxval=99, step=1, group=gG)
+
+// ---------- Volume Profile 1 ----------
+g1 = "=== Volume Profile 1 ==="
+tf1_en   = input.bool(true,  "Enable Volume Profile 1", group=g1)
+tf1_tf   = input.timeframe("D", "Profile timeframe", group=g1)
+tf1_rmod = input.string(ROW_COUNT, "Row layout", options=[ROW_COUNT, ROW_TICKS], group=g1)
+tf1_prec = input.int(24, "Rows / ticks", minval=1, maxval=1000, group=g1,
+     tooltip="Used as row count when Row layout = Number of rows, or ticks per row when Row layout = Ticks per row.")
+tf1_sl   = input.bool(true,  "POC/VAH/VAL", group=g1, inline="s1")
+tf1_sv   = input.bool(false, "VWAP", group=g1, inline="s1")
+tf1_ext  = input.bool(false, "Extend POC/VAH/VAL until broken", group=g1)
+tf1_poc  = input.color(color.new(color.orange, 0), "POC1", group=g1, inline="c1a")
+tf1_vah  = input.color(color.new(color.aqua, 30), "VAH1", group=g1, inline="c1a")
+tf1_val  = input.color(color.new(color.aqua, 30), "VAL1", group=g1, inline="c1a")
+tf1_vwap = input.color(color.new(color.fuchsia, 0), "VWAP1", group=g1, inline="c1b")
+
+// ---------- Volume Profile 2 ----------
+g2 = "=== Volume Profile 2 ==="
+tf2_en   = input.bool(true,  "Enable Volume Profile 2", group=g2)
+tf2_tf   = input.timeframe("W", "Profile timeframe", group=g2)
+tf2_rmod = input.string(ROW_COUNT, "Row layout", options=[ROW_COUNT, ROW_TICKS], group=g2)
+tf2_prec = input.int(20, "Rows / ticks", minval=1, maxval=1000, group=g2,
+     tooltip="Used as row count when Row layout = Number of rows, or ticks per row when Row layout = Ticks per row.")
+tf2_sl   = input.bool(true,  "POC/VAH/VAL", group=g2, inline="s2")
+tf2_sv   = input.bool(false, "VWAP", group=g2, inline="s2")
+tf2_ext  = input.bool(false, "Extend POC/VAH/VAL until broken", group=g2)
+tf2_poc  = input.color(color.new(color.red, 0), "POC2", group=g2, inline="c2a")
+tf2_vah  = input.color(color.new(color.lime, 30), "VAH2", group=g2, inline="c2a")
+tf2_val  = input.color(color.new(color.lime, 30), "VAL2", group=g2, inline="c2a")
+tf2_vwap = input.color(color.new(color.silver, 0), "VWAP2", group=g2, inline="c2b")
+
+// ---------- Volume Profile 3 ----------
+g3 = "=== Volume Profile 3 ==="
+tf3_en   = input.bool(true,  "Enable Volume Profile 3", group=g3)
+tf3_tf   = input.timeframe("M", "Profile timeframe", group=g3)
+tf3_rmod = input.string(ROW_COUNT, "Row layout", options=[ROW_COUNT, ROW_TICKS], group=g3)
+tf3_prec = input.int(20, "Rows / ticks", minval=1, maxval=1000, group=g3,
+     tooltip="Used as row count when Row layout = Number of rows, or ticks per row when Row layout = Ticks per row.")
+tf3_sl   = input.bool(true,  "POC/VAH/VAL", group=g3, inline="s3")
+tf3_sv   = input.bool(false, "VWAP", group=g3, inline="s3")
+tf3_ext  = input.bool(false, "Extend POC/VAH/VAL until broken", group=g3)
+tf3_poc  = input.color(color.new(color.purple, 0), "POC3", group=g3, inline="c3a")
+tf3_vah  = input.color(color.new(color.yellow, 30), "VAH3", group=g3, inline="c3a")
+tf3_val  = input.color(color.new(color.yellow, 30), "VAL3", group=g3, inline="c3a")
+tf3_vwap = input.color(color.new(color.teal, 0), "VWAP3", group=g3, inline="c3b")
+
+// ---------- Developing Profile ----------
+gD = "=== Developing Profile ==="
+dev_show_hist   = input.bool(true, "Show developing histogram", group=gD)
+dev_hist_source = input.string(DEV_VP3, "Histogram source", options=[DEV_VP1, DEV_VP2, DEV_VP3], group=gD)
+dev_level_source = input.string(DEV_ALL, "Level tags", options=[DEV_ALL, DEV_VP1, DEV_VP2, DEV_VP3], group=gD)
+dev_offset_bars = input.int(35, "Offset from latest candle", minval=1, maxval=300, group=gD)
+dev_width_bars  = input.int(28, "Histogram width (bars)", minval=5, maxval=200, group=gD)
+dev_up_col      = input.color(color.new(#26a69a, 25), "Volume Up", group=gD, inline="devc")
+dev_down_col    = input.color(color.new(#ef5350, 25), "Volume Down", group=gD, inline="devc")
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+autoIntrabarTF(string profileTF) =>
+    int tfSec = timeframe.in_seconds(profileTF)
+    tfSec <= 604800 ? "5" : tfSec <= 2592000 ? "15" : "30"
+
+
+countActive3(bool a, bool b, bool c) =>
+    (a ? 1 : 0) + (b ? 1 : 0) + (c ? 1 : 0)
+
+
+lineLookbackFor(TFConfig cfg, int activeLineSlots) =>
+    if not cfg.showLevels or activeLineSlots <= 0
+        0
+    else
+        int slotBudget = int(math.floor(MAX_LINE_BUDGET / activeLineSlots))
+        math.max(1, int(math.floor(slotBudget / 3)))
+
+
+deleteLevelPeriod(LevelPeriod old) =>
+    line.delete(old.pocLn)
+    line.delete(old.vahLn)
+    line.delete(old.valLn)
+
+
+pruneLevelsBeforeDraw(TFState s, int lineLookback) =>
+    while lineLookback > 0 and array.size(s.levels) >= lineLookback
+        LevelPeriod old = array.shift(s.levels)
+        deleteLevelPeriod(old)
+
+
+resolveBinning(TFConfig cfg, float pHigh, float pLow, int rowCap) =>
+    float rng = pHigh - pLow
+    int   rows = 0
+    float binSize = 0.0
+    if rng > 0 and rowCap > 0
+        if cfg.rowMode == ROW_TICKS
+            binSize := math.max(1, cfg.precision) * syminfo.mintick
+            if binSize > 0
+                rows := int(math.ceil(rng / binSize))
+                rows := math.max(5, math.min(rows, rowCap))
+                binSize := rng / rows
+        else
+            rows := math.max(5, math.min(cfg.precision, rowCap))
+            binSize := rng / rows
+    [rows, binSize]
+
+
+buildProfile(TFConfig cfg, array<float> accH, array<float> accL,
+             array<float> accO, array<float> accC, array<float> accV,
+             float vaPct, int rowCap) =>
+    int n = array.size(accH)
+    float pHigh = n > 0 ? array.max(accH) : 0.0
+    float pLow  = n > 0 ? array.min(accL) : 0.0
+    [rows, binSize] = resolveBinning(cfg, pHigh, pLow, rowCap)
+
+    array<float> bullBins = array.new<float>(math.max(1, rows), 0.0)
+    array<float> bearBins = array.new<float>(math.max(1, rows), 0.0)
+    int   pocIdx   = -1
+    float pocPrice = 0.0
+    float vahPrice = 0.0
+    float valPrice = 0.0
+
+    if rows > 0 and binSize > 0 and n > 0
+        for i = 0 to n - 1
+            float h = array.get(accH, i)
+            float l = array.get(accL, i)
+            float v = array.get(accV, i)
+            float o = array.get(accO, i)
+            float c = array.get(accC, i)
+            bool  isBull = c >= o
+
+            if v > 0 and h >= l
+                if h == l
+                    int bi = math.max(0, math.min(rows - 1, int(math.floor((c - pLow) / binSize))))
+                    if isBull
+                        array.set(bullBins, bi, array.get(bullBins, bi) + v)
+                    else
+                        array.set(bearBins, bi, array.get(bearBins, bi) + v)
+                else
+                    int firstBin = math.max(0, int(math.floor((l - pLow) / binSize)))
+                    int lastBin  = math.min(rows - 1, int(math.floor((h - pLow) / binSize)))
+                    if lastBin < firstBin
+                        lastBin := firstBin
+
+                    float barRange = h - l
+                    for b = firstBin to lastBin
+                        float binLo = pLow + b * binSize
+                        float binHi = pLow + (b + 1) * binSize
+                        float oLo = math.max(l, binLo)
+                        float oHi = math.min(h, binHi)
+                        float oLen = math.max(0.0, oHi - oLo)
+                        float frac = oLen / barRange
+                        float vBin = v * frac
+                        if isBull
+                            array.set(bullBins, b, array.get(bullBins, b) + vBin)
+                        else
+                            array.set(bearBins, b, array.get(bearBins, b) + vBin)
+
+        array<float> totalBins = array.new<float>(rows, 0.0)
+        float maxVol = 0.0
+        for b = 0 to rows - 1
+            float t = array.get(bullBins, b) + array.get(bearBins, b)
+            array.set(totalBins, b, t)
+            if t > maxVol
+                maxVol := t
+                pocIdx := b
+
+        if pocIdx >= 0
+            float totalVol = array.sum(totalBins)
+            float target   = totalVol * vaPct / 100.0
+            float cumVol   = array.get(totalBins, pocIdx)
+            int   vahIdx   = pocIdx
+            int   valIdx   = pocIdx
+            while cumVol < target
+                bool canUp   = vahIdx < rows - 1
+                bool canDown = valIdx > 0
+                if not canUp and not canDown
+                    break
+                float up   = canUp   ? array.get(totalBins, vahIdx + 1) : -1.0
+                float down = canDown ? array.get(totalBins, valIdx - 1) : -1.0
+                bool goUp = canUp and (not canDown or up >= down)
+                if goUp
+                    vahIdx += 1
+                    cumVol += array.get(totalBins, vahIdx)
+                else
+                    valIdx -= 1
+                    cumVol += array.get(totalBins, valIdx)
+            pocPrice := pLow + (pocIdx + 0.5) * binSize
+            vahPrice := pLow + (vahIdx + 1) * binSize
+            valPrice := pLow + valIdx * binSize
+
+    [bullBins, bearBins, pocIdx, rows, pLow, binSize, pocPrice, vahPrice, valPrice]
+
+
+useIntrabarFor(string intrabarTF, array<float> ibH) =>
+    int itbSec   = timeframe.in_seconds(intrabarTF)
+    int chartSec = timeframe.in_seconds(timeframe.period)
+    itbSec < chartSec and array.size(ibH) > 0
+
+
+accumulateBar(TFState s, bool useITB,
+              array<float> ibH, array<float> ibL, array<float> ibO,
+              array<float> ibC, array<float> ibV) =>
+    if useITB
+        int n = array.size(ibH)
+        for i = 0 to n - 1
+            array.push(s.accH, array.get(ibH, i))
+            array.push(s.accL, array.get(ibL, i))
+            array.push(s.accO, array.get(ibO, i))
+            array.push(s.accC, array.get(ibC, i))
+            array.push(s.accV, array.get(ibV, i))
+    else
+        array.push(s.accH, high)
+        array.push(s.accL, low)
+        array.push(s.accO, open)
+        array.push(s.accC, close)
+        array.push(s.accV, volume)
+
+
+drawLevels(TFConfig cfg, TFState s, float pocPrice, float vahPrice, float valPrice,
+           int periodStartBar, int periodEndBar, float closeAtEnd, int lineLookback) =>
+    if cfg.showLevels and lineLookback > 0
+        pruneLevelsBeforeDraw(s, lineLookback)
+
+        int rightEnd = cfg.extendLevels ? bar_index + EXT_PAD : periodEndBar
+        line pocLn = line.new(periodStartBar, pocPrice, rightEnd, pocPrice,
+             color = cfg.pocCol, width = 2, xloc = xloc.bar_index)
+        line vahLn = line.new(periodStartBar, vahPrice, rightEnd, vahPrice,
+             color = cfg.vahCol, width = 1, style = line.style_dashed, xloc = xloc.bar_index)
+        line valLn = line.new(periodStartBar, valPrice, rightEnd, valPrice,
+             color = cfg.valCol, width = 1, style = line.style_dashed, xloc = xloc.bar_index)
+
+        int pocSide = closeAtEnd >= pocPrice ? 1 : -1
+        int vahSide = closeAtEnd >= vahPrice ? 1 : -1
+        int valSide = closeAtEnd >= valPrice ? 1 : -1
+
+        LevelPeriod lp = LevelPeriod.new(pocLn, vahLn, valLn,
+             pocPrice, vahPrice, valPrice,
+             periodStartBar, periodEndBar,
+             false, false, false,
+             pocSide, vahSide, valSide)
+
+        array.push(s.levels, lp)
+
+
+updateExtendedLevels(TFConfig cfg, TFState s) =>
+    if cfg.extendLevels and cfg.showLevels
+        int n = array.size(s.levels)
+        if n > 0
+            for i = 0 to n - 1
+                LevelPeriod lp = array.get(s.levels, i)
+                if not lp.pocBroken
+                    int curSide = close >= lp.pocPrice ? 1 : -1
+                    if curSide != lp.pocInitSide
+                        lp.pocBroken := true
+                        line.set_x2(lp.pocLn, bar_index)
+                    else
+                        line.set_x2(lp.pocLn, bar_index + EXT_PAD)
+                if not lp.vahBroken
+                    int curSide = close >= lp.vahPrice ? 1 : -1
+                    if curSide != lp.vahInitSide
+                        lp.vahBroken := true
+                        line.set_x2(lp.vahLn, bar_index)
+                    else
+                        line.set_x2(lp.vahLn, bar_index + EXT_PAD)
+                if not lp.valBroken
+                    int curSide = close >= lp.valPrice ? 1 : -1
+                    if curSide != lp.valInitSide
+                        lp.valBroken := true
+                        line.set_x2(lp.valLn, bar_index)
+                    else
+                        line.set_x2(lp.valLn, bar_index + EXT_PAD)
+
+
+processTF(TFConfig cfg, TFState s,
+          array<float> ibH, array<float> ibL, array<float> ibO,
+          array<float> ibC, array<float> ibV,
+          float vaPct, int activeLineSlots) =>
+    if cfg.enabled
+        bool periodChanged = ta.change(time(cfg.tfPeriod)) != 0
+
+        if periodChanged and barstate.isconfirmed
+            if s.firstPeriodSeen and array.size(s.accH) > 0
+                int periodEndBar = bar_index - 1
+                int periodStartBar = s.periodStartBar
+                float closeAtEnd = close[1]
+                int lineLookback = lineLookbackFor(cfg, activeLineSlots)
+
+                [bullBins, bearBins, pocIdx, rows, pLow, binSize, pocPrice, vahPrice, valPrice] =
+                     buildProfile(cfg, s.accH, s.accL, s.accO, s.accC, s.accV, vaPct, MAX_ROWS_PER_PROFILE)
+
+                if pocIdx >= 0
+                    drawLevels(cfg, s, pocPrice, vahPrice, valPrice,
+                         periodStartBar, periodEndBar, closeAtEnd, lineLookback)
+
+            array.clear(s.accH)
+            array.clear(s.accL)
+            array.clear(s.accO)
+            array.clear(s.accC)
+            array.clear(s.accV)
+            s.periodStartBar := bar_index
+            s.firstPeriodSeen := true
+
+        if barstate.isconfirmed
+            bool useITB = useIntrabarFor(cfg.intrabarTF, ibH)
+            accumulateBar(s, useITB, ibH, ibL, ibO, ibC, ibV)
+
+        updateExtendedLevels(cfg, s)
+
+
+updateVwap(bool reset, float cumPV, float cumVol) =>
+    float nextPV = reset or na(cumPV) ? hlc3 * volume : cumPV + hlc3 * volume
+    float nextVol = reset or na(cumVol) ? volume : cumVol + volume
+    float vwap = nextVol > 0 ? nextPV / nextVol : na
+    [nextPV, nextVol, vwap]
+
+
+clearDevelopingObjects(array<box> boxes, array<line> lines, array<label> labels) =>
+    int nB = array.size(boxes)
+    if nB > 0
+        for i = 0 to nB - 1
+            box.delete(array.get(boxes, i))
+    int nL = array.size(lines)
+    if nL > 0
+        for i = 0 to nL - 1
+            line.delete(array.get(lines, i))
+    int nLb = array.size(labels)
+    if nLb > 0
+        for i = 0 to nLb - 1
+            label.delete(array.get(labels, i))
+    array.clear(boxes)
+    array.clear(lines)
+    array.clear(labels)
+
+
+tfPrefix(string tf) =>
+    tf == "D" or tf == "1D" ? "D" :
+     tf == "W" or tf == "1W" ? "W" :
+     tf == "M" or tf == "1M" ? "M" : tf
+
+
+drawDevelopingHistogram(array<box> boxes,
+                        array<float> bullBins, array<float> bearBins, int rows,
+                        float pLow, float binSize, int xLeft, int xRight,
+                        color upCol, color downCol) =>
+    if rows > 0 and binSize > 0
+        float maxBinTotal = 0.0
+        for b = 0 to rows - 1
+            float t = array.get(bullBins, b) + array.get(bearBins, b)
+            if t > maxBinTotal
+                maxBinTotal := t
+
+        int maxWidth = math.max(1, xRight - xLeft)
+        float scale = maxBinTotal > 0 ? maxWidth / maxBinTotal : 0.0
+
+        for b = 0 to rows - 1
+            float bv = array.get(bullBins, b)
+            float sv = array.get(bearBins, b)
+            if bv + sv > 0
+                float yBot = pLow + b * binSize
+                float yTop = pLow + (b + 1) * binSize
+                int upW = bv > 0 ? math.max(1, int(math.floor(bv * scale))) : 0
+                int downW = sv > 0 ? math.max(1, int(math.floor(sv * scale))) : 0
+                int upRight = xRight
+                int upLeft = xRight - upW
+                int downRight = upLeft
+                int downLeft = math.max(xLeft, downRight - downW)
+
+                if upW > 0
+                    box upBox = box.new(upLeft, yTop, upRight, yBot,
+                         border_color=color.new(upCol, 100), bgcolor=upCol,
+                         border_width=1, xloc=xloc.bar_index)
+                    array.push(boxes, upBox)
+                if downW > 0 and downRight > downLeft
+                    box downBox = box.new(downLeft, yTop, downRight, yBot,
+                         border_color=color.new(downCol, 100), bgcolor=downCol,
+                         border_width=1, xloc=xloc.bar_index)
+                    array.push(boxes, downBox)
+
+
+addDevelopingMarker(array<line> lines, array<label> labels,
+                    float price, string txt, color col,
+                    int xLeft, int xRight, int labelX,
+                    bool isPoc) =>
+    line ln = line.new(xLeft, price, xRight, price,
+         color=col, width=isPoc ? 2 : 1,
+         style=isPoc ? line.style_solid : line.style_dashed,
+         xloc=xloc.bar_index)
+    label lb = label.new(labelX, price, txt,
+         color=color.new(col, 0), textcolor=color.white,
+         style=label.style_label_right, size=size.tiny, xloc=xloc.bar_index)
+    array.push(lines, ln)
+    array.push(labels, lb)
+
+
+drawDevelopingLevelSet(array<line> lines, array<label> labels,
+                       TFConfig cfg, string prefix,
+                       float pocPrice, float vahPrice, float valPrice,
+                       int xLeft, int xRight, int labelX) =>
+    addDevelopingMarker(lines, labels, pocPrice, prefix + "POC", cfg.pocCol,
+         xLeft, xRight, labelX, true)
+    addDevelopingMarker(lines, labels, vahPrice, prefix + "VAH", cfg.vahCol,
+         xLeft, xRight, labelX, false)
+    addDevelopingMarker(lines, labels, valPrice, prefix + "VAL", cfg.valCol,
+         xLeft, xRight, labelX, false)
+
+// =============================================================================
+// STATE & CONFIG INSTANCES
+// =============================================================================
+
+var TFState tf1State = TFState.new(
+     array.new<float>(0), array.new<float>(0), array.new<float>(0),
+     array.new<float>(0), array.new<float>(0),
+     0, false, array.new<LevelPeriod>(0))
+
+var TFState tf2State = TFState.new(
+     array.new<float>(0), array.new<float>(0), array.new<float>(0),
+     array.new<float>(0), array.new<float>(0),
+     0, false, array.new<LevelPeriod>(0))
+
+var TFState tf3State = TFState.new(
+     array.new<float>(0), array.new<float>(0), array.new<float>(0),
+     array.new<float>(0), array.new<float>(0),
+     0, false, array.new<LevelPeriod>(0))
+
+var array<box> devBoxes = array.new<box>(0)
+var array<line> devLines = array.new<line>(0)
+var array<label> devLabels = array.new<label>(0)
+
+tf1_itf = autoIntrabarTF(tf1_tf)
+tf2_itf = autoIntrabarTF(tf2_tf)
+tf3_itf = autoIntrabarTF(tf3_tf)
+
+tf1Cfg = TFConfig.new(tf1_en, tf1_tf, tf1_itf, tf1_rmod, tf1_prec,
+     tf1_sl, tf1_ext, tf1_poc, tf1_vah, tf1_val)
+tf2Cfg = TFConfig.new(tf2_en, tf2_tf, tf2_itf, tf2_rmod, tf2_prec,
+     tf2_sl, tf2_ext, tf2_poc, tf2_vah, tf2_val)
+tf3Cfg = TFConfig.new(tf3_en, tf3_tf, tf3_itf, tf3_rmod, tf3_prec,
+     tf3_sl, tf3_ext, tf3_poc, tf3_vah, tf3_val)
+
+activeLineSlots = countActive3(tf1_en and tf1_sl, tf2_en and tf2_sl, tf3_en and tf3_sl)
+
+// =============================================================================
+// INTRABAR FETCHES
+// =============================================================================
+
+[tf1_ibH, tf1_ibL, tf1_ibO, tf1_ibC, tf1_ibV] =
+     request.security_lower_tf(syminfo.tickerid, tf1_itf, [high, low, open, close, volume],
+          ignore_invalid_timeframe = true)
+[tf2_ibH, tf2_ibL, tf2_ibO, tf2_ibC, tf2_ibV] =
+     request.security_lower_tf(syminfo.tickerid, tf2_itf, [high, low, open, close, volume],
+          ignore_invalid_timeframe = true)
+[tf3_ibH, tf3_ibL, tf3_ibO, tf3_ibC, tf3_ibV] =
+     request.security_lower_tf(syminfo.tickerid, tf3_itf, [high, low, open, close, volume],
+          ignore_invalid_timeframe = true)
+
+// =============================================================================
+// VWAP CURVES
+// =============================================================================
+
+var float tf1CumPV = na
+var float tf1CumVol = na
+var float tf2CumPV = na
+var float tf2CumVol = na
+var float tf3CumPV = na
+var float tf3CumVol = na
+
+tf1VwapReset = ta.change(time(tf1_tf)) != 0
+tf2VwapReset = ta.change(time(tf2_tf)) != 0
+tf3VwapReset = ta.change(time(tf3_tf)) != 0
+
+[tf1CumPVNext, tf1CumVolNext, tf1Vwap] = updateVwap(tf1VwapReset, tf1CumPV, tf1CumVol)
+[tf2CumPVNext, tf2CumVolNext, tf2Vwap] = updateVwap(tf2VwapReset, tf2CumPV, tf2CumVol)
+[tf3CumPVNext, tf3CumVolNext, tf3Vwap] = updateVwap(tf3VwapReset, tf3CumPV, tf3CumVol)
+
+tf1CumPV := tf1CumPVNext
+tf1CumVol := tf1CumVolNext
+tf2CumPV := tf2CumPVNext
+tf2CumVol := tf2CumVolNext
+tf3CumPV := tf3CumPVNext
+tf3CumVol := tf3CumVolNext
+
+plot(tf1_en and tf1_sv and not tf1VwapReset ? tf1Vwap : na,
+     "VWAP1", color=tf1_vwap, linewidth=2, style=plot.style_linebr)
+plot(tf2_en and tf2_sv and not tf2VwapReset ? tf2Vwap : na,
+     "VWAP2", color=tf2_vwap, linewidth=2, style=plot.style_linebr)
+plot(tf3_en and tf3_sv and not tf3VwapReset ? tf3Vwap : na,
+     "VWAP3", color=tf3_vwap, linewidth=2, style=plot.style_linebr)
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+processTF(tf1Cfg, tf1State, tf1_ibH, tf1_ibL, tf1_ibO, tf1_ibC, tf1_ibV,
+     valueAreaPct, activeLineSlots)
+processTF(tf2Cfg, tf2State, tf2_ibH, tf2_ibL, tf2_ibO, tf2_ibC, tf2_ibV,
+     valueAreaPct, activeLineSlots)
+processTF(tf3Cfg, tf3State, tf3_ibH, tf3_ibL, tf3_ibO, tf3_ibC, tf3_ibV,
+     valueAreaPct, activeLineSlots)
+
+// =============================================================================
+// DEVELOPING PROFILE DISPLAY
+// =============================================================================
+
+if barstate.islast
+    clearDevelopingObjects(devBoxes, devLines, devLabels)
+
+    int safeOffset = math.min(dev_offset_bars, 300)
+    int safeWidth = math.max(5, math.min(dev_width_bars, 492 - safeOffset))
+    int devXLeft = bar_index + safeOffset
+    int devXRight = devXLeft + safeWidth
+    bool showVp1DevLevels = tf1_en and (dev_level_source == DEV_ALL or dev_level_source == DEV_VP1)
+    bool showVp2DevLevels = tf2_en and (dev_level_source == DEV_ALL or dev_level_source == DEV_VP2)
+    bool showVp3DevLevels = tf3_en and (dev_level_source == DEV_ALL or dev_level_source == DEV_VP3)
+    int labelStep = 6
+    int labelRank = 0
+    int vp1LabelX = devXLeft - 1
+    int vp2LabelX = devXLeft - 1
+    int vp3LabelX = devXLeft - 1
+    if showVp1DevLevels
+        vp1LabelX := devXLeft - 1 - labelRank * labelStep
+        labelRank += 1
+    if showVp2DevLevels
+        vp2LabelX := devXLeft - 1 - labelRank * labelStep
+        labelRank += 1
+    if showVp3DevLevels
+        vp3LabelX := devXLeft - 1 - labelRank * labelStep
+    int devRowCap = math.min(MAX_ROWS_PER_PROFILE, int(math.floor(MAX_BOX_BUDGET / 2)))
+
+    if dev_show_hist and dev_hist_source == DEV_VP1 and tf1_en and array.size(tf1State.accH) > 0
+        [hBull1, hBear1, hPocIdx1, hRows1, hLow1, hBin1, hPoc1, hVah1, hVal1] =
+             buildProfile(tf1Cfg, tf1State.accH, tf1State.accL, tf1State.accO, tf1State.accC, tf1State.accV,
+                  valueAreaPct, devRowCap)
+        if hPocIdx1 >= 0
+            drawDevelopingHistogram(devBoxes, hBull1, hBear1, hRows1, hLow1, hBin1,
+                 devXLeft, devXRight, dev_up_col, dev_down_col)
+
+    if dev_show_hist and dev_hist_source == DEV_VP2 and tf2_en and array.size(tf2State.accH) > 0
+        [hBull2, hBear2, hPocIdx2, hRows2, hLow2, hBin2, hPoc2, hVah2, hVal2] =
+             buildProfile(tf2Cfg, tf2State.accH, tf2State.accL, tf2State.accO, tf2State.accC, tf2State.accV,
+                  valueAreaPct, devRowCap)
+        if hPocIdx2 >= 0
+            drawDevelopingHistogram(devBoxes, hBull2, hBear2, hRows2, hLow2, hBin2,
+                 devXLeft, devXRight, dev_up_col, dev_down_col)
+
+    if dev_show_hist and dev_hist_source == DEV_VP3 and tf3_en and array.size(tf3State.accH) > 0
+        [hBull3, hBear3, hPocIdx3, hRows3, hLow3, hBin3, hPoc3, hVah3, hVal3] =
+             buildProfile(tf3Cfg, tf3State.accH, tf3State.accL, tf3State.accO, tf3State.accC, tf3State.accV,
+                  valueAreaPct, devRowCap)
+        if hPocIdx3 >= 0
+            drawDevelopingHistogram(devBoxes, hBull3, hBear3, hRows3, hLow3, hBin3,
+                 devXLeft, devXRight, dev_up_col, dev_down_col)
+
+    if showVp1DevLevels and array.size(tf1State.accH) > 0
+        [lBull1, lBear1, lPocIdx1, lRows1, lLow1, lBin1, lPoc1, lVah1, lVal1] =
+             buildProfile(tf1Cfg, tf1State.accH, tf1State.accL, tf1State.accO, tf1State.accC, tf1State.accV,
+                  valueAreaPct, devRowCap)
+        if lPocIdx1 >= 0
+            drawDevelopingLevelSet(devLines, devLabels, tf1Cfg, tfPrefix(tf1_tf),
+                 lPoc1, lVah1, lVal1, devXLeft, devXRight, vp1LabelX)
+
+    if showVp2DevLevels and array.size(tf2State.accH) > 0
+        [lBull2, lBear2, lPocIdx2, lRows2, lLow2, lBin2, lPoc2, lVah2, lVal2] =
+             buildProfile(tf2Cfg, tf2State.accH, tf2State.accL, tf2State.accO, tf2State.accC, tf2State.accV,
+                  valueAreaPct, devRowCap)
+        if lPocIdx2 >= 0
+            drawDevelopingLevelSet(devLines, devLabels, tf2Cfg, tfPrefix(tf2_tf),
+                 lPoc2, lVah2, lVal2, devXLeft, devXRight, vp2LabelX)
+
+    if showVp3DevLevels and array.size(tf3State.accH) > 0
+        [lBull3, lBear3, lPocIdx3, lRows3, lLow3, lBin3, lPoc3, lVah3, lVal3] =
+             buildProfile(tf3Cfg, tf3State.accH, tf3State.accL, tf3State.accO, tf3State.accC, tf3State.accV,
+                  valueAreaPct, devRowCap)
+        if lPocIdx3 >= 0
+            drawDevelopingLevelSet(devLines, devLabels, tf3Cfg, tfPrefix(tf3_tf),
+                 lPoc3, lVah3, lVal3, devXLeft, devXRight, vp3LabelX)

@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Editor and assistant settings
+.claude/
+.vscode/
+.idea/
+
+# Never commit secrets
+.env
+.env.*
+*.key
+*.pem

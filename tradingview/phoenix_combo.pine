@@ -1,0 +1,279 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Combines:
+//   - "Phoenix B-Bands WyckoffMode" by WyckoffMode (6 Fibonacci StdDev levels + spread % UI)
+//   - "Ichimoku, 3 BB, Multi MAs" (8 MAs, Ichimoku, Rainbow BB)
+//@version=6
+indicator(title="Phoenix BB + Ichimoku + 3 BB + Multi MAs", shorttitle="Phoenix Combo", overlay=true, max_boxes_count=50, max_labels_count=50)
+
+// =====================================================================
+// MOVING AVERAGES (8)
+// =====================================================================
+g_ma = "Moving Averages"
+use_ema    = input.bool(false, "Exponential MA", group=g_ma)
+enable_ma  = input.bool(true,  "Enable 6 Moving Averages", group=g_ma)
+ma1_len    = input.int(7,   "MA 1", minval=1, group=g_ma)
+ma2_len    = input.int(50,  "MA 2", minval=1, group=g_ma)
+ma3_len    = input.int(100, "MA 3", minval=1, group=g_ma)
+ma4_len    = input.int(200, "MA 4", minval=1, group=g_ma)
+ma5_len    = input.int(120, "MA 5", minval=1, group=g_ma)
+ma6_len    = input.int(240, "MA 6", minval=1, group=g_ma)
+ma7_len    = input.int(240, "MA 7", minval=1, group=g_ma)
+ma8_len    = input.int(240, "MA 8", minval=1, group=g_ma)
+ma_src     = input.source(close, "MA Source", group=g_ma)
+
+ma(src, len) => use_ema ? ta.ema(src, len) : ta.sma(src, len)
+
+ma1 = ma(ma_src, ma1_len)
+ma2 = ma(ma_src, ma2_len)
+ma3 = ma(ma_src, ma3_len)
+ma4 = ma(ma_src, ma4_len)
+ma5 = ma(ma_src, ma5_len)
+ma6 = ma(ma_src, ma6_len)
+ma7 = ma(ma_src, ma7_len)
+ma8 = ma(ma_src, ma8_len)
+
+plot(enable_ma ? ma1 : na, "MA 1", color=#ff5252, linewidth=1)
+plot(enable_ma ? ma2 : na, "MA 2", color=#ffb74d, linewidth=1)
+plot(enable_ma ? ma3 : na, "MA 3", color=#fff176, linewidth=1)
+plot(enable_ma ? ma4 : na, "MA 4", color=#81c784, linewidth=1)
+plot(enable_ma ? ma5 : na, "MA 5", color=#4fc3f7, linewidth=1)
+plot(enable_ma ? ma6 : na, "MA 6", color=#9575cd, linewidth=1)
+plot(enable_ma ? ma7 : na, "MA 7", color=#f06292, linewidth=1)
+plot(enable_ma ? ma8 : na, "MA 8", color=#bdbdbd, linewidth=1)
+
+// =====================================================================
+// RAINBOW BOLLINGER BAND (3 multipliers)
+// =====================================================================
+g_rbb = "Rainbow Bollinger Bands"
+enable_rbb     = input.bool(true,  "Enable Rainbow Bollinger Band", group=g_rbb)
+show_rbb_basis = input.bool(true,  "Show Rainbow BB Basis", group=g_rbb)
+rbb_len        = input.int(20, "Rainbow BB Length", minval=1, group=g_rbb)
+rbb_src        = input.source(hlc3, "Rainbow BB Source", group=g_rbb)
+rbb_mult1      = input.float(2.0, "Rainbow BB Multi 1", minval=0.001, maxval=50, step=0.1, group=g_rbb)
+rbb_mult2      = input.float(2.5, "Rainbow BB Multi 2", minval=0.001, maxval=50, step=0.1, group=g_rbb)
+
+rbb_basis = ta.sma(rbb_src, rbb_len)
+rbb_dev   = ta.stdev(rbb_src, rbb_len)
+rbb_up1   = rbb_basis + rbb_mult1 * rbb_dev
+rbb_lo1   = rbb_basis - rbb_mult1 * rbb_dev
+rbb_up2   = rbb_basis + rbb_mult2 * rbb_dev
+rbb_lo2   = rbb_basis - rbb_mult2 * rbb_dev
+
+plot(enable_rbb and show_rbb_basis ? rbb_basis : na, "RBB Basis", color=#ffeb3b, linewidth=1)
+plot(enable_rbb ? rbb_up1 : na, "RBB Upper 1", color=#26a69a, linewidth=1)
+plot(enable_rbb ? rbb_lo1 : na, "RBB Lower 1", color=#26a69a, linewidth=1)
+plot(enable_rbb ? rbb_up2 : na, "RBB Upper 2", color=#42a5f5, linewidth=1)
+plot(enable_rbb ? rbb_lo2 : na, "RBB Lower 2", color=#42a5f5, linewidth=1)
+
+// =====================================================================
+// ICHIMOKU CLOUD
+// =====================================================================
+g_ichi = "Ichimoku"
+enable_ichi   = input.bool(true, "Enable Ichimoku", group=g_ichi)
+ichi_conv_len = input.int(9,  "Ichimoku Conversion Line Period", minval=1, group=g_ichi)
+ichi_base_len = input.int(26, "Ichimoku Base Line Period", minval=1, group=g_ichi)
+ichi_lag_len  = input.int(52, "Ichimoku Lagging Span 2 Period", minval=1, group=g_ichi)
+ichi_disp     = input.int(26, "Ichimoku Displacement", minval=1, group=g_ichi)
+
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+
+conv  = donchian(ichi_conv_len)
+baseL = donchian(ichi_base_len)
+spanA = math.avg(conv, baseL)
+spanB = donchian(ichi_lag_len)
+
+plot(enable_ichi ? conv  : na, "Conversion Line", color=#2962ff)
+plot(enable_ichi ? baseL : na, "Base Line",       color=#b71c1c)
+plot(enable_ichi ? close : na, "Lagging Span",    color=#43a047, offset=-ichi_disp)
+sA = plot(enable_ichi ? spanA : na, "Leading Span A", color=#26a69a, offset=ichi_disp - 1)
+sB = plot(enable_ichi ? spanB : na, "Leading Span B", color=#ef5350, offset=ichi_disp - 1)
+cloud_col = spanA > spanB ? color.new(#26a69a, 80) : color.new(#ef5350, 80)
+fill(sA, sB, color = enable_ichi ? cloud_col : color.new(#26a69a, 100), title="Cloud")
+
+// =====================================================================
+// PHOENIX BOLLINGER BANDS (6 Fibonacci StdDev levels)
+// =====================================================================
+g_phx = "Phoenix BB"
+enable_phx = input.bool(true, "Enable Phoenix BB", group=g_phx)
+phx_length = input.int(20, "Phoenix Basis Length", minval=1, group=g_phx)
+phx_src    = input.source(close, "Phoenix Source", group=g_phx)
+phx_offset = input.int(0, "Offset", minval=-500, maxval=500, group=g_phx)
+
+phx_m01 = input.float(1.0,   "StdDev 1.0",   minval=0.001, maxval=50, step=0.001, group=g_phx)
+phx_m02 = input.float(1.618, "StdDev 1.618", minval=0.001, maxval=50, step=0.001, group=g_phx)
+phx_m03 = input.float(2.618, "StdDev 2.618", minval=0.001, maxval=50, step=0.001, group=g_phx)
+phx_m04 = input.float(3.618, "StdDev 3.618", minval=0.001, maxval=50, step=0.001, group=g_phx)
+phx_m05 = input.float(4.618, "StdDev 4.618", minval=0.001, maxval=50, step=0.001, group=g_phx)
+
+phx_basis = ta.sma(phx_src, phx_length)
+phx_sd    = ta.stdev(phx_src, phx_length)
+
+upper01 = phx_basis + phx_m01 * phx_sd
+lower01 = phx_basis - phx_m01 * phx_sd
+upper02 = phx_basis + phx_m02 * phx_sd
+lower02 = phx_basis - phx_m02 * phx_sd
+upper03 = phx_basis + phx_m03 * phx_sd
+lower03 = phx_basis - phx_m03 * phx_sd
+upper04 = phx_basis + phx_m04 * phx_sd
+lower04 = phx_basis - phx_m04 * phx_sd
+upper05 = phx_basis + phx_m05 * phx_sd
+lower05 = phx_basis - phx_m05 * phx_sd
+
+// --- Spread % UI ---
+g_wul = "Phoenix: White Upper/Lower Spread"
+show_wul = input.bool(true, "Show %", group=g_wul)
+wul_tcol = input.color(color.white, "Text Color", group=g_wul)
+wul_lcol = input.color(color.white, "Line Color", group=g_wul)
+wul_fen  = input.bool(false, "Fill Spread %", group=g_wul)
+wul_th   = input.float(4.0, "Threshold", group=g_wul)
+
+g_wa = "Phoenix: White/Aqua Spread"
+show_wa = input.bool(true, "Show %", group=g_wa)
+wa_tcol = input.color(#00ffff, "Text Color", group=g_wa)
+wa_lcol = input.color(#00ffff, "Line Color", group=g_wa)
+wa_fen  = input.bool(false, "Fill Spread %", group=g_wa)
+wa_th   = input.float(4.0, "Threshold", group=g_wa)
+
+g_ao = "Phoenix: Aqua/Orange Spread"
+show_ao = input.bool(true, "Show %", group=g_ao)
+ao_tcol = input.color(#ff9800, "Text Color", group=g_ao)
+ao_lcol = input.color(#ff9800, "Line Color", group=g_ao)
+ao_fen  = input.bool(false, "Fill Spread %", group=g_ao)
+ao_th   = input.float(4.0, "Threshold", group=g_ao)
+
+g_or = "Phoenix: Orange/Red Spread"
+show_or = input.bool(true, "Show %", group=g_or)
+or_tcol = input.color(#f44336, "Text Color", group=g_or)
+or_lcol = input.color(#f44336, "Line Color", group=g_or)
+or_fen  = input.bool(false, "Fill Spread %", group=g_or)
+or_th   = input.float(4.0, "Threshold", group=g_or)
+
+g_rp = "Phoenix: Red/Purple Spread"
+show_rp = input.bool(true, "Show %", group=g_rp)
+rp_tcol = input.color(#9815d4, "Text Color", group=g_rp)
+rp_lcol = input.color(#9815d4, "Line Color", group=g_rp)
+rp_fen  = input.bool(false, "Fill Spread %", group=g_rp)
+rp_th   = input.float(4.0, "Threshold", group=g_rp)
+
+font_size_input = input.string("Large", "Spread % Font Size", options=["Huge", "Large", "Normal", "Small", "Tiny"], group=g_phx)
+perc_font_size = font_size_input == "Huge"   ? size.huge :
+                 font_size_input == "Large"  ? size.large :
+                 font_size_input == "Normal" ? size.normal :
+                 font_size_input == "Small"  ? size.small : size.tiny
+
+percentages(upper_band, lower_band) =>
+    perc_up   = math.round((upper_band - lower_band) / lower_band * 100, 1)
+    perc_down = math.round((upper_band - lower_band) / upper_band * 100, 1)
+    [perc_up, perc_down]
+
+[wul_up, wul_dn]     = percentages(upper01, lower01)
+[wa_uup, wa_udn]     = percentages(upper02, upper01)
+[wa_lup, wa_ldn]     = percentages(lower01, lower02)
+[ao_uup, ao_udn]     = percentages(upper03, upper02)
+[ao_lup, ao_ldn]     = percentages(lower02, lower03)
+[or_uup, or_udn]     = percentages(upper04, upper03)
+[or_lup, or_ldn]     = percentages(lower03, lower04)
+[rp_uup, rp_udn]     = percentages(upper05, upper04)
+[rp_lup, rp_ldn]     = percentages(lower04, lower05)
+
+// --- Phoenix plots ---
+D05U = plot(enable_phx ? upper05 : na, "Upper 4.618", color=#9815d4, linewidth=1, offset=phx_offset)
+D04U = plot(enable_phx ? upper04 : na, "Upper 3.618", color=#f44336, linewidth=1, offset=phx_offset)
+D03U = plot(enable_phx ? upper03 : na, "Upper 2.618", color=#ff9800, linewidth=1, offset=phx_offset)
+D02U = plot(enable_phx ? upper02 : na, "Upper 1.618", color=#00ffff, linewidth=1, offset=phx_offset)
+D01U = plot(enable_phx ? upper01 : na, "Upper 1.0",   color=#ffffff, linewidth=1, offset=phx_offset)
+plot(enable_phx ? phx_basis : na, "Phoenix Basis", color=#ffff00, style=plot.style_circles, linewidth=2, offset=phx_offset)
+D01L = plot(enable_phx ? lower01 : na, "Lower 1.0",   color=#ffffff, linewidth=1, offset=phx_offset)
+D02L = plot(enable_phx ? lower02 : na, "Lower 1.618", color=#00ffff, linewidth=1, offset=phx_offset)
+D03L = plot(enable_phx ? lower03 : na, "Lower 2.618", color=#ff9800, linewidth=1, offset=phx_offset)
+D04L = plot(enable_phx ? lower04 : na, "Lower 3.618", color=#f44336, linewidth=1, offset=phx_offset)
+D05L = plot(enable_phx ? lower05 : na, "Lower 4.618", color=#9815d4, linewidth=1, offset=phx_offset)
+
+// --- Spread % boxes + labels (drawn on last bar only) ---
+transparent = color.new(color.black, 100)
+
+draw_spread(condition, top_, bot_, lcol, tcol, up_v, dn_v, prev_b, prev_l) =>
+    box b = na
+    label l = na
+    if barstate.islast
+        box.delete(prev_b)
+        label.delete(prev_l)
+        if condition
+            b := box.new(left=bar_index + 1, top=top_, right=bar_index + 1, bottom=bot_, border_color=lcol)
+            l := label.new(x=bar_index + 1, y=math.avg(top_, bot_), text="⇑" + str.tostring(up_v) + "⇓" + str.tostring(dn_v), style=label.style_label_left, color=transparent, textcolor=tcol, size=perc_font_size)
+    [b, l]
+
+var box   wul_b = na
+var label wul_l = na
+var box   waU_b = na
+var label waU_l = na
+var box   waL_b = na
+var label waL_l = na
+var box   aoU_b = na
+var label aoU_l = na
+var box   aoL_b = na
+var label aoL_l = na
+var box   orU_b = na
+var label orU_l = na
+var box   orL_b = na
+var label orL_l = na
+var box   rpU_b = na
+var label rpU_l = na
+var box   rpL_b = na
+var label rpL_l = na
+
+[wul_b2, wul_l2] = draw_spread(enable_phx and show_wul, upper01, lower01, wul_lcol, wul_tcol, wul_up,  wul_dn,  wul_b, wul_l)
+wul_b := wul_b2
+wul_l := wul_l2
+
+[waU_b2, waU_l2] = draw_spread(enable_phx and show_wa,  upper02, upper01, wa_lcol,  wa_tcol,  wa_uup,  wa_udn,  waU_b, waU_l)
+waU_b := waU_b2
+waU_l := waU_l2
+[waL_b2, waL_l2] = draw_spread(enable_phx and show_wa,  lower01, lower02, wa_lcol,  wa_tcol,  wa_lup,  wa_ldn,  waL_b, waL_l)
+waL_b := waL_b2
+waL_l := waL_l2
+
+[aoU_b2, aoU_l2] = draw_spread(enable_phx and show_ao,  upper03, upper02, ao_lcol,  ao_tcol,  ao_uup,  ao_udn,  aoU_b, aoU_l)
+aoU_b := aoU_b2
+aoU_l := aoU_l2
+[aoL_b2, aoL_l2] = draw_spread(enable_phx and show_ao,  lower02, lower03, ao_lcol,  ao_tcol,  ao_lup,  ao_ldn,  aoL_b, aoL_l)
+aoL_b := aoL_b2
+aoL_l := aoL_l2
+
+[orU_b2, orU_l2] = draw_spread(enable_phx and show_or,  upper04, upper03, or_lcol,  or_tcol,  or_uup,  or_udn,  orU_b, orU_l)
+orU_b := orU_b2
+orU_l := orU_l2
+[orL_b2, orL_l2] = draw_spread(enable_phx and show_or,  lower03, lower04, or_lcol,  or_tcol,  or_lup,  or_ldn,  orL_b, orL_l)
+orL_b := orL_b2
+orL_l := orL_l2
+
+[rpU_b2, rpU_l2] = draw_spread(enable_phx and show_rp,  upper05, upper04, rp_lcol,  rp_tcol,  rp_uup,  rp_udn,  rpU_b, rpU_l)
+rpU_b := rpU_b2
+rpU_l := rpU_l2
+[rpL_b2, rpL_l2] = draw_spread(enable_phx and show_rp,  lower04, lower05, rp_lcol,  rp_tcol,  rp_lup,  rp_ldn,  rpL_b, rpL_l)
+rpL_b := rpL_b2
+rpL_l := rpL_l2
+
+// --- Spread % threshold fills ---
+wul_on  = enable_phx and wul_fen and (wul_up  > wul_th or wul_dn  > wul_th)
+fill(D01U, D01L, color=wul_on ? color.new(color.white, 75) : color.new(color.white, 100), title="W U/L % Fill")
+
+waU_on  = enable_phx and wa_fen  and (wa_uup  > wa_th  or wa_udn  > wa_th)
+fill(D01U, D02U, color=waU_on ? color.new(#198787, 70) : color.new(#198787, 100), title="W/A Upper % Fill")
+waL_on  = enable_phx and wa_fen  and (wa_lup  > wa_th  or wa_ldn  > wa_th)
+fill(D01L, D02L, color=waL_on ? color.new(#198787, 70) : color.new(#198787, 100), title="W/A Lower % Fill")
+
+aoU_on  = enable_phx and ao_fen  and (ao_uup  > ao_th  or ao_udn  > ao_th)
+fill(D02U, D03U, color=aoU_on ? color.new(#ff9800, 80) : color.new(#ff9800, 100), title="A/O Upper % Fill")
+aoL_on  = enable_phx and ao_fen  and (ao_lup  > ao_th  or ao_ldn  > ao_th)
+fill(D02L, D03L, color=aoL_on ? color.new(#ff9800, 80) : color.new(#ff9800, 100), title="A/O Lower % Fill")
+
+orU_on  = enable_phx and or_fen  and (or_uup  > or_th  or or_udn  > or_th)
+fill(D03U, D04U, color=orU_on ? color.new(#f44336, 87) : color.new(#f44336, 100), title="O/R Upper % Fill")
+orL_on  = enable_phx and or_fen  and (or_lup  > or_th  or or_ldn  > or_th)
+fill(D03L, D04L, color=orL_on ? color.new(#f44336, 87) : color.new(#f44336, 100), title="O/R Lower % Fill")
+
+rpU_on  = enable_phx and rp_fen  and (rp_uup  > rp_th  or rp_udn  > rp_th)
+fill(D04U, D05U, color=rpU_on ? color.new(#9815d4, 88) : color.new(#9815d4, 100), title="R/P Upper % Fill")
+rpL_on  = enable_phx and rp_fen  and (rp_lup  > rp_th  or rp_ldn  > rp_th)
+fill(D04L, D05L, color=rpL_on ? color.new(#9815d4, 88) : color.new(#9815d4, 100), title="R/P Lower % Fill")
